@@ -10,6 +10,7 @@ authors = ["#author#"]
 
 # Dependencies that will included with final binary
 [dependencies]
+nmrs = "2.0.0"
 tokio = { version = "1.49.0", features = ["full"] }
 uuid = "1.21.0"
 zbus = "5.13.2"

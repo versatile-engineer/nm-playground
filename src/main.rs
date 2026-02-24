@@ -1,95 +1,94 @@
-use std::collections::HashMap;
-use zbus::{proxy, Connection};
-
-#[proxy(
-    interface = "org.freedesktop.NetworkManager",
-    default_service = "org.freedesktop.NetworkManager",
-    default_path = "/org/freedesktop/NetworkManager"
-)]
-trait NetworkManager {
-    fn get_devices(&self) -> zbus::Result<Vec<zbus::zvariant::OwnedObjectPath>>;
-}
-
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.Device",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-trait Device {
-    #[zbus(property)]
-    fn device_type(&self) -> zbus::Result<u32>;
-}
-
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.Device.Wireless",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-
-trait Wireless {
-    fn request_scan(&self, options: HashMap<String, zbus::zvariant::Value<'_>>)
-        -> zbus::Result<()>;
-    fn get_access_points(&self) -> zbus::Result<Vec<zbus::zvariant::OwnedObjectPath>>;
-}
-
-#[proxy(
-    interface = "org.freedesktop.NetworkManager.AccessPoint",
-    default_service = "org.freedesktop.NetworkManager"
-)]
-
-trait AccessPoint {
-    #[zbus(property)]
-    fn ssid(&self) -> zbus::Result<Vec<u8>>;
-
-    #[zbus(property)]
-    fn strength(&self) -> zbus::Result<u8>;
-
-    #[zbus(property)]
-    fn frequency(&self) -> zbus::Result<u32>;
-}
+use nmrs::{models::Network, NetworkManager};
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::main]
-async fn main() -> zbus::Result<()> {
-    let connection = Connection::system().await?;
+async fn main() -> nmrs::Result<()> {
+    // Initialize NetworkManager
+    let nm = NetworkManager::new().await?;
 
-    let nm = NetworkManagerProxy::new(&connection).await?;
+    println!("WiFi Network Scanner");
+    println!("===================\n");
 
-    let devices = nm.get_devices().await?;
+    // Scan loop
+    loop {
+        // Clear screen (Unix/Linux)
+        print!("\x1B[2J\x1B[1;1H");
 
-    for device_path in devices {
-        let device = DeviceProxy::builder(&connection)
-            .path(device_path.clone())?
-            .build()
-            .await?;
+        // Get networks
+        let mut networks = nm.list_networks().await?;
 
-        if device.device_type().await? == 2 {
-            println!("WiFi device topildi: {}", device_path);
+        // Sort by signal strength (strongest first)
+        networks.sort_by(|a, b| b.strength.unwrap_or(0).cmp(&a.strength.unwrap_or(0)));
 
-            let wifi = WirelessProxy::builder(&connection)
-                .path(device_path.clone())?
-                .build()
-                .await?;
+        // Display header
+        println!("WiFi Network Scanner - {} networks found\n", networks.len());
+        println!(
+            "{:<30} {:>10} {:>8} {:<20}",
+            "SSID", "Signal", "Band", "Security"
+        );
+        println!("{}", "-".repeat(70));
 
-            wifi.request_scan(HashMap::new()).await?;
-
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            let aps = wifi.get_access_points().await?;
-
-            println!("Mavjud tarmoqlar:");
-            for ap_path in aps {
-                let ap = AccessPointProxy::builder(&connection)
-                    .path(ap_path)?
-                    .build()
-                    .await?;
-
-                let ssid_bytes = ap.ssid().await?;
-                let ssid = String::from_utf8_lossy(&ssid_bytes);
-                let strength = ap.strength().await?;
-
-                println!("  SSID: {}, Signal: {}%", ssid, strength);
-            }
-
-            break;
+        // Display each network
+        for net in networks {
+            print_network(&net);
         }
-    }
 
-    Ok(())
+        println!("\n{}", "-".repeat(70));
+        println!("Press Ctrl+C to exit");
+
+        // Wait before next scan
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
+fn print_network(net: &Network) {
+    let signal = net.strength.unwrap_or(0);
+    let signal_bar = signal_strength_bar(signal);
+
+    let band = match net.frequency {
+        Some(freq) if freq > 5000 => "5GHz",
+        Some(_) => "2.4GHz",
+        None => "Unknown",
+    };
+
+    // let security = match &net.security {
+    //     nmrs::WifiSecurity::Open => "Open",
+    //     nmrs::WifiSecurity::WpaPsk { .. } => "WPA-PSK",
+    //     nmrs::WifiSecurity::WpaEap { .. } => "WPA-EAP",
+    // };
+
+    println!(
+        "{:<30} {:>3}% {} {:>8}",
+        truncate_ssid(&net.ssid, 30),
+        signal,
+        signal_bar,
+        band,
+    );
+}
+
+fn signal_strength_bar(strength: u8) -> String {
+    let bars = match strength {
+        80..=100 => "▂▄▆█",
+        60..=79 => "▂▄▆▁",
+        40..=59 => "▂▄▁▁",
+        20..=39 => "▂▁▁▁",
+        _ => "▁▁▁▁",
+    };
+
+    let color = match strength {
+        70..=100 => "\x1b[32m", // Green
+        40..=69 => "\x1b[33m",  // Yellow
+        _ => "\x1b[31m",        // Red
+    };
+
+    format!("{}{}\x1b[0m", color, bars)
+}
+
+fn truncate_ssid(ssid: &str, max_len: usize) -> String {
+    if ssid.len() <= max_len {
+        ssid.to_string()
+    } else {
+        format!("{}...", &ssid[..max_len - 3])
+    }
 }
